@@ -1,10 +1,10 @@
 #pragma once
 /* IR.hxx:  Intermediate representaiton of C symbols after parsing */
 
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
-#include <set>
 
 #include <clang-c/Index.h>
 #include "Tc.hxx"
@@ -28,6 +28,7 @@ struct Constant {
 };
 
 struct Typedef {
+	Typedef() = default;
 	Typedef(CXCursor definition);
 	auto operator<=>(const Typedef&) const = default;
 
@@ -45,6 +46,7 @@ struct Field {
 };
 
 struct Struct {
+	Struct() = default;
 	Struct(CXCursor definition);
 	auto operator<=>(const Struct&) const = default;
 
@@ -57,6 +59,7 @@ struct Struct {
 };
 
 struct Enum {
+	Enum() = default;
 	Enum(CXCursor definition);
 	auto operator<=>(const Enum&) const = default;
 
@@ -66,6 +69,7 @@ struct Enum {
 };
 
 struct Function {
+	Function() = default;
 	Function(CXCursor declaration);
 	auto operator<=>(const Function&) const = default;
 

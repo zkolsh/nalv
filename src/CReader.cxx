@@ -1,6 +1,11 @@
-#include "CReader.hxx"
 #include <cassert>
+#include <climits>
 #include <iostream>
+
+#include <clang-c/Index.h>
+#include "CReader.hxx"
+
+#define GUARD(condition) do { if (!(condition)) return std::nullopt; } while (0)
 
 TranslationUnit FromSourceFile(const std::filesystem::path filename) {
 	assert(std::filesystem::exists(filename));
@@ -44,26 +49,28 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 
 	switch (clang_getCursorKind(cursor)) {
 	case CXCursor_StructDecl: {
-		if (clang_Cursor_isAnonymous(cursor)) {
-			return CXChildVisit_Continue;
-		};
-
-		CXString cursorName = clang_getCursorSpelling(cursor);
-		std::string name = HSTypeName(clang_getCString(cursorName));
-		clang_disposeString(cursorName);
-
-		if (name.empty()) {
-			std::cerr << "StructDecl: empty underlying name." << std::endl;
-			break;
-		};
-
 		if (!clang_isCursorDefinition(cursor)) {
+			CXString cursorName = clang_getCursorSpelling(cursor);
+			std::string name = HSTypeName(clang_getCString(cursorName));
+			clang_disposeString(cursorName);
+
 			if (!name.empty()) {
 				bindings->UnknownNames.insert(name + "_");
 			};
+
+			break;
+		};
+
+		std::optional<Struct> st = ParseStruct(cursor);
+		if (st.has_value()) {
+			bindings->DataTypes.emplace(st.value());
+			bindings->KnownNames.insert(st.value().BoundName);
+			bindings->UnknownNames.erase(st.value().BoundName);
 		} else {
-			bindings->DataTypes.emplace(cursor);
-			bindings->KnownNames.insert(name);
+			CXString name = clang_getCursorSpelling(cursor);
+			std::cout << "StructDecl: failed to emit "
+			          << clang_getCString(name) << std::endl;
+			clang_disposeString(name);
 		};
 
 		break;
@@ -96,13 +103,16 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 			break;
 		};
 
-		CXString cursorName = clang_getCursorSpelling(cursor);
-		HSType name = HSTypeName(clang_getCString(cursorName));
-		if (name != "Bool") {
-			bindings->KnownNames.insert(name);
-			bindings->Enumerations.emplace(cursor);
+		std::optional<Enum> e = ParseEnum(cursor);
+		if (e.has_value()) {
+			bindings->Enumerations.emplace(e.value());
+			bindings->KnownNames.insert(e.value().BoundName);
+		} else {
+			CXString name = clang_getCursorSpelling(cursor);
+			std::cout << "EnumDecl: failed to emit "
+			          << clang_getCString(name) << std::endl;
+			clang_disposeString(name);
 		};
-		clang_disposeString(cursorName);
 
 		break;
 	};
@@ -114,16 +124,16 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 			break;
 		};
 
-		CXString cursorName = clang_getCursorSpelling(cursor);
-		HSType name = HSTypeName(clang_getCString(cursorName));
-
-		/* Boolean types are sometimes defined manually.  Do not emit them. */
-		if (name != "True" && name != "False") {
-			long long value = clang_getEnumConstantDeclValue(cursor);
-			bindings->Constants.emplace(name, std::to_string(value));
+		std::optional<Constant> c = ParseEnumConstant(cursor);
+		if (c.has_value()) {
+			bindings->Constants.emplace(c.value());
+		} else {
+			CXString name = clang_getCursorSpelling(cursor);
+			std::cout << "EnumDecl: failed to emit "
+			          << clang_getCString(name) << std::endl;
+			clang_disposeString(name);
 		};
 
-		clang_disposeString(cursorName);
 		break;
 	};
 
@@ -133,11 +143,15 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 			break;
 		};
 
-		if (clang_Cursor_isVariadic(cursor)) {
-			break;
+		std::optional<Function> fun = ParseFunction(cursor);
+		if (fun.has_value()) {
+			bindings->Functions.emplace(fun.value());
+		} else {
+			CXString name = clang_getCursorSpelling(cursor);
+			std::cout << "FunctionDecl: failed to emit "
+			          << clang_getCString(name) << std::endl;
+			clang_disposeString(name);
 		};
-
-		bindings->Functions.emplace(cursor);
 		break;
 	};
 
@@ -147,56 +161,50 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 			break;
 		};
 
-		bindings->Bindings.emplace(cursor);
+		std::optional<Variable> var = ParseVariable(cursor);
+		if (var.has_value()) {
+			bindings->Bindings.emplace(var.value());
+		} else {
+			CXString name = clang_getCursorSpelling(cursor);
+			std::cout << "VarDecl: failed to emit "
+			          << clang_getCString(name) << std::endl;
+			clang_disposeString(name);
+		};
+
 		break;
 	};
 
 	case CXCursor_TypedefDecl: {
-		if (clang_Cursor_isAnonymous(cursor)) {
-			return CXChildVisit_Continue;
-		};
-
 		CXCursor canon = clang_getCanonicalCursor(cursor);
 		if (!clang_equalCursors(cursor, canon)) {
 			break;
 		};
 
-		Typedef t{cursor};
+		std::optional<Typedef> t_ = ParseTypedef(cursor);
+		if (!t_.has_value()) {
+			break;
+		};
+
+		Typedef& t = t_.value();
+
 		if (bindings->KnownNames.contains(t.BoundName)) {
 			break;
 		};
 
-		if (t.SourceName.empty() == true) {
-			std::cerr << "TypedefDecl: empty underlying name." << std::endl;
-			break;
-		};
-
-		//FIXME: hacky
-		if (t.BoundName.find("VaListTag") != std::string::npos
-		 || t.SourceName.find("VaListTag") != std::string::npos) {
-			break;
-		};
-
-		/* Already in Prelude */
-		if (t.BoundName == "Bool") {
-			break;
-		};
-
-		if (t.SourceName.find("Ptr ") != std::string::npos
-		 || t.SourceName.find("ConstPtr ") != std::string::npos
-		 || t.SourceName.find("FunPtr ") != std::string::npos
-		 || bindings->UnknownNames.contains(t.SourceName)
-		 || FundamentalTypes.contains(t.SourceName)) {
-			bindings->KnownNames.insert(t.BoundName);
-			bindings->TypeAliases.insert(std::move(t));
-		} else if (bindings->UnknownNames.contains(t.SourceName + "_")) {
+		if (bindings->UnknownNames.contains(t.SourceName + "_")
+		 || t.SourceName == t.BoundName) {
 			t.SourceName += "_";
-			bindings->KnownNames.insert(t.BoundName);
-			bindings->TypeAliases.insert(std::move(t));
-		} else {
-			bindings->KnownNames.insert(t.BoundName);
+		};
+
+		bindings->KnownNames.insert(t.BoundName);
+		bindings->TypeAliases.insert(t);
+
+		if (!FundamentalTypes.contains(t.SourceName)
+		 && t.SourceName.find("Ptr ") == std::string::npos
+		 && t.SourceName.find("ConstPtr ") == std::string::npos
+		 && t.SourceName.find("FunPtr ") == std::string::npos
+		 && t.SourceName.find(" ") == std::string::npos) {
 			bindings->UnknownNames.insert(t.SourceName);
-			bindings->TypeAliases.insert(std::move(t));
 		};
 
 		break;
@@ -207,4 +215,192 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 	};
 
 	return CXChildVisit_Continue;
+};
+
+std::optional<Variable> ParseVariable(CXCursor cursor) {
+	Variable var{};
+	CXString name = clang_getCursorSpelling(cursor);
+	var.SourceName = clang_getCString(name);
+	var.BoundName = HSBindingName(var.SourceName);
+	clang_disposeString(name);
+	GUARD(!var.SourceName.empty());
+	GUARD(!var.BoundName.empty());
+
+	CXType type = clang_getCursorType(cursor);
+	var.Type = ToHSType(type);
+	GUARD(!var.Type.empty());
+
+	CXSourceLocation source = clang_getCursorLocation(cursor);
+	CXFile file;
+	clang_getExpansionLocation(source, &file, nullptr, nullptr, nullptr);
+	if (file) {
+		CXString filename = clang_getFileName(file);
+		var.SourceHeader = clang_getCString(filename);
+		clang_disposeString(filename);
+	};
+
+	GUARD(!var.SourceHeader.empty());
+	return var;
+};
+
+std::optional<Typedef> ParseTypedef(CXCursor cursor) {
+	GUARD(!clang_Cursor_isAnonymous(cursor));
+
+	Typedef td{};
+	CXString alias = clang_getCursorSpelling(cursor);
+	td.BoundName = HSTypeName(clang_getCString(alias));
+	clang_disposeString(alias);
+
+	CXType underlying = clang_getTypedefDeclUnderlyingType(cursor);
+	td.SourceName = ToHSType(underlying);
+
+	GUARD(!td.SourceName.empty());
+	GUARD(!td.BoundName.empty());
+	GUARD(td.BoundName != td.SourceName);
+	return td;
+};
+
+std::optional<Field> ParseStructField(CXCursor cursor) {
+	GUARD(clang_getCursorKind(cursor) == CXCursor_FieldDecl);
+	GUARD(!clang_Cursor_isAnonymous(cursor));
+	Field field{};
+
+	CXType fieldType = clang_getCursorType(cursor);
+	long long size = clang_Type_getSizeOf(fieldType);
+	long long offset = clang_Cursor_getOffsetOfField(cursor) / 8;
+	CXString name = clang_getCursorSpelling(cursor);
+
+	field.BoundName = HSFunctionName(clang_getCString(name));
+	field.Type = ToHSType(fieldType);
+	field.Size = size;
+	field.Offset = offset;
+
+	clang_disposeString(name);
+	GUARD(size > 0);
+	GUARD(offset >= 0);
+	GUARD(!field.BoundName.empty());
+	return field;
+};
+
+std::optional<Struct> ParseStruct(CXCursor cursor) {
+	GUARD(!clang_Cursor_isAnonymous(cursor));
+	Struct st{};
+
+	CXString structName = clang_getCursorSpelling(cursor);
+	st.SourceName = clang_getCString(structName);
+	st.BoundName = HSTypeName(st.SourceName);
+	clang_disposeString(structName);
+
+	CXSourceLocation source = clang_getCursorLocation(cursor);
+	CXFile file;
+	clang_getExpansionLocation(source, &file, nullptr, nullptr, nullptr);
+	if (file) {
+		CXString filename = clang_getFileName(file);
+		st.SourceHeader = clang_getCString(filename);
+		clang_disposeString(filename);
+	};
+
+	CXType structType = clang_getCursorType(cursor);
+	st.Size = clang_Type_getSizeOf(structType);
+	st.Alignment = clang_Type_getAlignOf(structType);
+	GUARD(!st.BoundName.empty());
+	GUARD(!st.SourceName.empty());
+	GUARD(st.Size > 0);
+	GUARD(st.Alignment > 0);
+
+	auto ret = clang_visitChildren(cursor, [](CXCursor child, CXCursor, CXClientData cd) {
+		Struct* self = reinterpret_cast<Struct*>(cd);
+		std::optional<Field> f = ParseStructField(child);
+		if (!f.has_value()) {
+			return CXChildVisit_Break;
+		};
+
+		self->Fields.emplace_back(f.value());
+		return CXChildVisit_Continue;
+
+	}, reinterpret_cast<CXClientData>(&st));
+
+	GUARD(ret == 0);
+	return st;
+};
+
+std::optional<Constant> ParseEnumConstant(CXCursor cursor) {
+	GUARD(clang_getCursorKind(cursor) == CXCursor_EnumConstantDecl);
+	CXString spelling = clang_getCursorSpelling(cursor);
+	HSType name = HSPatternName(clang_getCString(spelling));
+	long long value = clang_getEnumConstantDeclValue(cursor);
+	clang_disposeString(spelling);
+
+	GUARD(!name.empty());
+	GUARD(name != "True");
+	GUARD(name != "False");
+	GUARD(value != LLONG_MIN);
+	return std::optional<Constant>({name, std::to_string(value)});
+};
+
+std::optional<Enum> ParseEnum(CXCursor cursor) {
+	Enum e{};
+	CXString enumName = clang_getCursorSpelling(cursor);
+	e.BoundName = HSTypeName(clang_getCString(enumName));
+	clang_disposeString(enumName);
+	GUARD(e.BoundName != "Bool");
+	GUARD(!FundamentalTypes.contains(e.BoundName));
+
+	CXType underlyingType = clang_getEnumDeclIntegerType(cursor);
+	e.Type = ToHSType(underlyingType);
+	GUARD(!e.Type.empty());
+
+	auto ret = clang_visitChildren(cursor, [](CXCursor child, CXCursor, CXClientData cd) {
+		Enum* self = reinterpret_cast<Enum*>(cd);
+		std::optional<Constant> c = ParseEnumConstant(child);
+		if (!c.has_value()) {
+			return CXChildVisit_Break;
+		};
+
+		self->Members.emplace_back(c.value());
+		return CXChildVisit_Continue;
+	}, reinterpret_cast<CXClientData>(&e));
+	GUARD(ret == 0);
+
+	return e;
+};
+
+std::optional<Function> ParseFunction(CXCursor cursor) {
+	GUARD(!clang_Cursor_isAnonymous(cursor));
+	GUARD(!clang_Cursor_isVariadic(cursor));
+
+	Function fn{};
+	CXString fnName = clang_getCursorSpelling(cursor);
+	fn.ReturnType = ToHSType(clang_getCursorResultType(cursor));
+	fn.SourceName = clang_getCString(fnName);
+	fn.BoundName = HSFunctionName(fn.SourceName);
+	clang_disposeString(fnName);
+	GUARD(!fn.ReturnType.empty());
+	GUARD(!fn.SourceName.empty());
+	GUARD(!fn.BoundName.empty());
+
+	CXSourceLocation source = clang_getCursorLocation(cursor);
+	CXFile file;
+	clang_getExpansionLocation(source, &file, nullptr, nullptr, nullptr);
+	if (file) {
+		CXString filename = clang_getFileName(file);
+		fn.SourceHeader = clang_getCString(filename);
+		clang_disposeString(filename);
+	};
+
+	GUARD(!fn.SourceHeader.empty());
+
+	const int argCount = clang_Cursor_getNumArguments(cursor);
+	fn.Arguments.resize(argCount);
+	for (int i = 0; i < argCount; i++) {
+		CXCursor arg = clang_Cursor_getArgument(cursor, i);
+		CXType type = clang_getCursorType(arg);
+		CXString name = clang_getCursorSpelling(arg);
+		fn.Arguments.at(i) = std::make_pair(ToHSType(type), clang_getCString(name));
+		clang_disposeString(name);
+		GUARD(!fn.Arguments.at(i).first.empty());
+		GUARD(!fn.Arguments.at(i).second.empty());
+	};
+
+	return fn;
 };
