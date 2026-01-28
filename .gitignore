@@ -1,0 +1,5 @@
+rsrc/*
+build/*
+nalv
+tasks.md
+.clangd
