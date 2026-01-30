@@ -2,6 +2,14 @@
 #include <vector>
 #include <iostream>
 
+static inline std::string Parens(const std::string s) {
+	if (s.find(' ') != std::string::npos) {
+		return "(" + s + ")";
+	} else {
+		return s;
+	};
+};
+
 std::string HSBindingName(const std::string_view cname) {
 	std::string o{};
 	if (cname.empty()) return o;
@@ -74,9 +82,22 @@ std::string HSPatternName(const std::string_view cname) {
 	return o;
 };
 
+static HSType FunctionType(CXType type) {
+	std::string o{};
+	
+	int argCount = clang_getNumArgTypes(type);
+	for (int i = 0; i < argCount; i++) {
+		std::string arg = ToHSType(clang_getArgType(type, i));
+		o += arg + " -> ";
+	};
+
+	HSType rt = ToHSType(clang_getResultType(type));
+
+	return o + "IO " + Parens(rt);
+};
+
 HSType ToHSType(CXType type) {
 	std::string o{};
-	type = clang_getCanonicalType(type);
 
 	switch (type.kind) {
 	case CXType_Invalid: /* FALLTHROUGH */
@@ -86,33 +107,15 @@ HSType ToHSType(CXType type) {
 
 	case CXType_Pointer: {
 		CXType pointee = clang_getPointeeType(type);
-		pointee = clang_getCanonicalType(pointee);
+		CXType canonPointee = clang_getCanonicalType(pointee);
 
-		if (pointee.kind == CXType_FunctionProto
-		 || pointee.kind == CXType_FunctionNoProto) {
+		if (canonPointee.kind == CXType_FunctionProto
+		 || canonPointee.kind == CXType_FunctionNoProto) {
 			/* Function pointers. */
-			o += "FunPtr (";
-
-			int argCount = clang_getNumArgTypes(pointee);
-			for (int i = 0; i < argCount; i++) {
-				std::string arg = ToHSType(clang_getArgType(pointee, i));
-				o += arg + " -> ";
-			};
-
-			HSType rt = ToHSType(clang_getResultType(pointee));
-			if (rt.find(' ') != std::string::npos) {
-				rt = "(" + rt + ")";
-			};
-
-			o += "IO " + rt + ")";
+			o += "FunPtr " + Parens(FunctionType(canonPointee));
 		} else {
 			/* Regular pointers. */
-			HSType innerType = ToHSType(pointee);
-
-			if (innerType.find(' ') != std::string::npos) {
-				innerType = "(" + innerType + ")";
-			};
-
+			HSType innerType = Parens(ToHSType(pointee));
 			HSType pointer = clang_isConstQualifiedType(pointee)?
 				"ConstPtr" : "Ptr";
 
@@ -122,17 +125,19 @@ HSType ToHSType(CXType type) {
 		break;
 	};
 
+	case CXType_FunctionProto: /* FALLTHROUGH */
+	case CXType_FunctionNoProto: {
+		o += FunctionType(type);
+		break;
+	};
+
 	/* libclang makes a difference between char* and char[], but CApiFFI doesn't. */
 	case CXType_IncompleteArray:
 	case CXType_VariableArray:
 	case CXType_DependentSizedArray:
 	case CXType_ConstantArray: {
 		CXType pointee = clang_getArrayElementType(type);
-		HSType innerType = ToHSType(pointee);
-
-		if (innerType.find(' ') != std::string::npos) {
-			innerType = "(" + innerType + ")";
-		};
+		HSType innerType = Parens(ToHSType(pointee));
 
 		HSType pointer = clang_isConstQualifiedType(pointee)?
 			"ConstPtr" : "Ptr";
@@ -196,7 +201,13 @@ HSType ToHSType(CXType type) {
 	};
 
 	/* Type aliases should be emitted by Nalv, so they can be used normally. */
-	case CXType_Typedef: /* FALLTHROUGH */
+	case CXType_Typedef: {
+		CXString source = clang_getTypedefName(type);
+		std::string name = clang_getCString(source);
+		clang_disposeString(source);
+		o += HSTypeName(name);
+		break;
+	};
 
 	/* Structs, enums and anything else we don't know:  Hope that the 
 	 * Haskell name already exists, and/or that an opaque data type

@@ -180,32 +180,103 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 			break;
 		};
 
-		std::optional<Typedef> t_ = ParseTypedef(cursor);
-		if (!t_.has_value()) {
+		std::optional<std::pair<Struct, Typedef>> tstruct = ParseStructTypedef(cursor);
+		if (tstruct.has_value()) {
+			auto& [st, td] = tstruct.value();
+
+			if (st.Size >= 0) {
+				bindings->DataTypes.insert(st);
+			} else if (!st.BoundName.empty()) {
+				bindings->UnknownNames.insert(st.BoundName);
+			};
+
+			if (td.BoundName == td.SourceName) {
+				break;
+			};
+
+			const std::string_view prefixes[] = {
+				"ConstPtr ",
+				"Ptr "
+			};
+
+			HSType source = td.SourceName;
+			for (const auto& pfx : prefixes) {
+				if (source.find(pfx) == 0) {
+					source.erase(0, pfx.length());
+				};
+			};
+
+			if (!bindings->KnownNames.contains(source)
+			 && !FundamentalTypes.contains(source)) {
+				bindings->UnknownNames.insert(source);
+			};
+
+			bindings->KnownNames.insert(td.BoundName);
+			bindings->TypeAliases.insert(td);
 			break;
 		};
 
-		Typedef& t = t_.value();
+		std::optional<std::pair<Enum, Typedef>> tenum = ParseEnumTypedef(cursor);
+		if (tstruct.has_value()) {
+			auto& [e, td] = tenum.value();
 
-		if (bindings->KnownNames.contains(t.BoundName)) {
+			bindings->Enumerations.insert(e);
+			if (!e.BoundName.empty()) {
+				bindings->KnownNames.insert(e.BoundName);
+			};
+
+			if (td.BoundName == td.SourceName) {
+				break;
+			};
+
+			bindings->TypeAliases.insert(td);
 			break;
 		};
 
-		if (bindings->UnknownNames.contains(t.SourceName + "_")
-		 || t.SourceName == t.BoundName) {
-			t.SourceName += "_";
-		};
+		std::optional<Typedef> treg = ParseRegularTypedef(cursor);
+		if (treg.has_value()) {
+			Typedef& td = treg.value();
 
-		bindings->KnownNames.insert(t.BoundName);
-		bindings->TypeAliases.insert(t);
+			if (bindings->KnownNames.contains(td.BoundName)) {
+				break;
+			};
 
-		if (!FundamentalTypes.contains(t.SourceName)
-		 && t.SourceName.find("Ptr ") == std::string::npos
-		 && t.SourceName.find("ConstPtr ") == std::string::npos
-		 && t.SourceName.find("FunPtr ") == std::string::npos
-		 && t.SourceName.find(" ") == std::string::npos) {
-			bindings->UnknownNames.insert(t.SourceName);
+			if (bindings->UnknownNames.contains(td.SourceName + "_")
+			 || td.SourceName == td.BoundName) {
+				td.SourceName += "_";
+			};
+
+			bindings->KnownNames.insert(td.BoundName);
+			bindings->TypeAliases.insert(td);
+
+			bool isTrivialOpaque = true;
+			const std::string_view prefixes[] = {
+				"ConstPtr ",
+				"FunPtr ",
+				"Ptr "
+			};
+
+			for (const auto& pfx : prefixes) {
+				if (td.SourceName.find(pfx) == 0) {
+					isTrivialOpaque = false;
+					break;
+				};
+			};
+
+			if (!bindings->KnownNames.contains(td.SourceName)
+			 && !FundamentalTypes.contains(td.SourceName)
+			 && isTrivialOpaque) {
+				bindings->UnknownNames.insert(td.SourceName);
+			};
+
+			break;
 		};
+		
+		/* All branches end with a break, so you shouldn't be here. */
+		CXString name = clang_getCursorSpelling(cursor);
+		std::cout << "TypedefDecl: failed to emit "
+			  << clang_getCString(name) << std::endl;
+		clang_disposeString(name);
 
 		break;
 	};
@@ -243,7 +314,7 @@ std::optional<Variable> ParseVariable(CXCursor cursor) {
 	return var;
 };
 
-std::optional<Typedef> ParseTypedef(CXCursor cursor) {
+std::optional<Typedef> ParseRegularTypedef(CXCursor cursor) {
 	GUARD(!clang_Cursor_isAnonymous(cursor));
 
 	Typedef td{};
@@ -253,11 +324,95 @@ std::optional<Typedef> ParseTypedef(CXCursor cursor) {
 
 	CXType underlying = clang_getTypedefDeclUnderlyingType(cursor);
 	td.SourceName = ToHSType(underlying);
+	if (underlying.kind == CXType_FunctionProto
+	 || underlying.kind == CXType_FunctionNoProto) {
+		td.SourceName = "FunPtr (" + td.SourceName + ")";
+	};
 
 	GUARD(!td.SourceName.empty());
 	GUARD(!td.BoundName.empty());
 	GUARD(td.BoundName != td.SourceName);
 	return td;
+};
+
+std::optional<std::pair<Struct, Typedef>> ParseStructTypedef(CXCursor cursor) {
+	GUARD(clang_getCursorKind(cursor) == CXCursor_TypedefDecl);
+	Typedef td{};
+
+	CXString alias = clang_getCursorSpelling(cursor);
+	td.BoundName = HSTypeName(clang_getCString(alias));
+	clang_disposeString(alias);
+	GUARD(!td.BoundName.empty());
+
+	CXType underlyingType = clang_getTypedefDeclUnderlyingType(cursor);
+	const bool isStructPointer = underlyingType.kind == CXType_Pointer;
+	CXType targetType = isStructPointer ? clang_getPointeeType(underlyingType)
+	                                    : underlyingType;
+
+	CXCursor underlying = clang_getTypeDeclaration(targetType);
+	const bool isDefinition = clang_isCursorDefinition(underlying);
+
+	GUARD(clang_getCursorKind(underlying) == CXCursor_StructDecl);
+	std::optional<Struct> st = ParseStruct(underlying, true);
+	if (!isDefinition) {
+		CXString spelling = clang_getCursorSpelling(underlying);
+		std::string name = clang_getCString(spelling);
+		clang_disposeString(spelling);
+
+		Struct fallback{};
+		fallback.Size = -1;
+		fallback.BoundName = HSTypeName(name) + (isStructPointer? "_" : "");
+
+		td.SourceName = st.value_or(fallback).BoundName;
+		if (isStructPointer && td.SourceName.back() != '_') {
+			td.SourceName += "_";
+		};
+
+		return std::make_pair(st.value_or(fallback), td);
+	};
+
+	GUARD(st.has_value());
+
+	if (st.value().BoundName.empty()) {
+		st.value().BoundName = td.BoundName;
+		td.SourceName = td.BoundName;
+	} else {
+		td.SourceName = st.value().BoundName;
+	};
+
+	return std::make_pair(st.value(), td);
+};
+
+std::optional<std::pair<Enum, Typedef>> ParseEnumTypedef(CXCursor cursor) {
+	GUARD(clang_getCursorKind(cursor) == CXCursor_TypedefDecl);
+	Typedef td{};
+
+	CXString alias = clang_getCursorSpelling(cursor);
+	td.BoundName = HSTypeName(clang_getCString(alias));
+	clang_disposeString(alias);
+	GUARD(!td.BoundName.empty());
+
+	CXType underlyingType = clang_getTypedefDeclUnderlyingType(cursor);
+	CXCursor underlying = clang_getTypeDeclaration(underlyingType);
+	const bool isDefinition = clang_isCursorDefinition(underlying);
+
+	GUARD(clang_getCursorKind(underlying) == CXCursor_EnumDecl);
+	std::optional<Enum> e = ParseEnum(underlying);
+	if (!isDefinition) {
+		CXString spelling = clang_getCursorSpelling(underlying);
+		std::string name = clang_getCString(spelling);
+		clang_disposeString(spelling);
+
+		Enum fallback{};
+		fallback.BoundName = "";
+		fallback.Members.clear();
+		td.SourceName = e.value_or(fallback).BoundName;
+		return std::make_pair(e.value_or(fallback), td);
+	};
+
+	GUARD(e.has_value());
+	td.SourceName = e.value().BoundName;
+	return std::make_pair(e.value(), td);
 };
 
 std::optional<Field> ParseStructField(CXCursor cursor) {
@@ -282,8 +437,12 @@ std::optional<Field> ParseStructField(CXCursor cursor) {
 	return field;
 };
 
-std::optional<Struct> ParseStruct(CXCursor cursor) {
-	GUARD(!clang_Cursor_isAnonymous(cursor));
+std::optional<Struct> ParseStruct(CXCursor cursor, bool allowAnonymous) {
+	GUARD(clang_getCursorKind(cursor) == CXCursor_StructDecl);
+	if (!allowAnonymous) {
+		GUARD(!clang_Cursor_isAnonymous(cursor));
+	};
+
 	Struct st{};
 
 	CXString structName = clang_getCursorSpelling(cursor);
