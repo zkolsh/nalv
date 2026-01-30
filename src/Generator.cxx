@@ -9,7 +9,6 @@ void BindingsToFile(std::filesystem::path filename, const TranslationUnit& bindi
 
 	std::vector<std::string_view> extensions = {
 		"CApiFFI",
-		"DisambiguateRecordFields",
 		"DuplicateRecordFields",
 		"OverloadedRecordDot",
 		"PatternSynonyms",
@@ -95,14 +94,14 @@ void BindingsToFile(std::filesystem::path filename, const TranslationUnit& bindi
 				file << Tab << indent << "<*> ";
 			};
 
-			file << "peekByteOff (castPtr ptr) "
+			file << "peekByteOff ptr "
 			     << dt.Fields.at(i).Offset << LineEnd;
 		};
 
 		file << Tab << "poke ptr x = do" << LineEnd;
 		for (const auto& field : dt.Fields) {
-			file << Tab << Tab << "pokeByteOff (castPtr ptr) "
-			     << field.Offset << " (x." << field.BoundName << ")" << LineEnd;
+			file << Tab << Tab << "pokeByteOff ptr "
+			     << field.Offset << " x." << field.BoundName << LineEnd;
 		};
 
 		file << LineEnd;

@@ -340,11 +340,15 @@ std::optional<Constant> ParseEnumConstant(CXCursor cursor) {
 
 std::optional<Enum> ParseEnum(CXCursor cursor) {
 	Enum e{};
-	CXString enumName = clang_getCursorSpelling(cursor);
-	e.BoundName = HSTypeName(clang_getCString(enumName));
-	clang_disposeString(enumName);
-	GUARD(e.BoundName != "Bool");
-	GUARD(!FundamentalTypes.contains(e.BoundName));
+	if (clang_Cursor_isAnonymous(cursor)) {
+		e.BoundName = "";
+	} else {
+		CXString enumName = clang_getCursorSpelling(cursor);
+		e.BoundName = HSTypeName(clang_getCString(enumName));
+		clang_disposeString(enumName);
+		GUARD(e.BoundName != "Bool");
+		GUARD(!FundamentalTypes.contains(e.BoundName));
+	};
 
 	CXType underlyingType = clang_getEnumDeclIntegerType(cursor);
 	e.Type = ToHSType(underlyingType);
