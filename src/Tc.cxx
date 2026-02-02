@@ -1,4 +1,5 @@
 #include "Tc.hxx"
+#include <clang-c/Index.h>
 #include <vector>
 #include <iostream>
 
@@ -97,6 +98,21 @@ static HSType FunctionType(CXType type) {
 };
 
 HSType ToHSType(CXType type) {
+	if (type.kind == CXType_Attributed) {
+		return ToHSType(clang_Type_getModifiedType(type));
+	};
+
+	if (type.kind == CXType_Elaborated) {
+		return ToHSType(clang_Type_getNamedType(type));
+	};
+
+	if (type.kind == CXType_Unexposed) {
+		CXType canon = clang_getCanonicalType(type);
+		if (canon.kind != CXType_Unexposed) {
+			return ToHSType(canon);
+		};
+	};
+
 	std::string o{};
 
 	switch (type.kind) {

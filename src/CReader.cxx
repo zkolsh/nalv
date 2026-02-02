@@ -574,7 +574,6 @@ std::optional<Function> ParseFunction(CXCursor cursor) {
 		fn.Arguments.at(i) = std::make_pair(ToHSType(type), clang_getCString(name));
 		clang_disposeString(name);
 		GUARD(!fn.Arguments.at(i).first.empty());
-		GUARD(!fn.Arguments.at(i).second.empty());
 	};
 
 	return fn;
