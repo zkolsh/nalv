@@ -362,30 +362,14 @@ std::optional<std::pair<Struct, Typedef>> ParseStructTypedef(CXCursor cursor) {
 	                                    : underlyingType;
 
 	CXCursor underlying = clang_getTypeDeclaration(targetType);
-	const bool isDefinition = clang_isCursorDefinition(underlying);
-
 	GUARD(clang_getCursorKind(underlying) == CXCursor_StructDecl);
+
 	std::optional<Struct> st = ParseStruct(underlying, true);
-	if (!isDefinition) {
-		CXString spelling = clang_getCursorSpelling(underlying);
-		std::string name = clang_getCString(spelling);
-		clang_disposeString(spelling);
-
-		Struct fallback{};
-		fallback.Size = -1;
-		fallback.BoundName = HSTypeName(name) + (isStructPointer? "_" : "");
-
-		td.SourceName = st.value_or(fallback).BoundName;
-		if (isStructPointer && td.SourceName.back() != '_') {
-			td.SourceName += "_";
-		};
-
-		return std::make_pair(st.value_or(fallback), td);
-	};
-
 	GUARD(st.has_value());
 
-	if (st.value().BoundName.empty()) {
+	if (isStructPointer) {
+		td.SourceName = "Ptr " + st.value().BoundName;
+	} else if (st.value().BoundName.empty()) {
 		st.value().BoundName = td.BoundName;
 		td.SourceName = td.BoundName;
 	} else {
@@ -476,7 +460,14 @@ std::optional<Struct> ParseStruct(CXCursor cursor, bool allowAnonymous) {
 	st.Alignment = clang_Type_getAlignOf(structType);
 	GUARD(!st.BoundName.empty());
 	GUARD(!st.SourceName.empty());
-	GUARD(st.Size > 0);
+	if (st.Size <= 0) {
+		if (st.BoundName.back() != '_') {
+			st.BoundName += "_";
+		};
+
+		return st;
+	};
+
 	GUARD(st.Alignment > 0);
 
 	auto ret = clang_visitChildren(cursor, [](CXCursor child, CXCursor, CXClientData cd) {

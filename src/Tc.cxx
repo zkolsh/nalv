@@ -113,6 +113,16 @@ HSType ToHSType(CXType type) {
 		};
 	};
 
+	/* Fundamental types by name */
+	/* In some situations, these types might fall into the typedef case, which
+	 * would incorrectly convert, for example, uint8_t into Uint8T. */
+	CXString spelling = clang_getTypeSpelling(type);
+	std::string name = clang_getCString(spelling);
+	clang_disposeString(spelling);
+	if (FundamentalTypes.contains(name)) {
+		return std::string(FundamentalTypes.at(name).Name);
+	};
+
 	std::string o{};
 
 	switch (type.kind) {
@@ -131,11 +141,19 @@ HSType ToHSType(CXType type) {
 			o += "FunPtr " + Parens(FunctionType(canonPointee));
 		} else {
 			/* Regular pointers. */
-			HSType innerType = Parens(ToHSType(pointee));
+			HSType innerType = ToHSType(pointee);
+
+			if (clang_Type_getSizeOf(pointee) < 0
+			 && innerType.back() != '_'
+			 && pointee.kind == canonPointee.kind
+			 && canonPointee.kind != CXType_Void) {
+				innerType += "_";
+			};
+
 			HSType pointer = clang_isConstQualifiedType(pointee)?
 				"ConstPtr" : "Ptr";
 
-			o += pointer + " " + innerType;
+			o += pointer + " " + Parens(innerType);
 		};
 
 		break;
@@ -162,7 +180,7 @@ HSType ToHSType(CXType type) {
 		break;
 	};
 
-	/* Fundamental types */
+	/* Fundamental types by type kind */
 	case CXType_Void: /* FALLTHROUGH */
 	case CXType_Bool: /* FALLTHROUGH */
 	case CXType_Char_U: /* FALLTHROUGH */
@@ -225,9 +243,9 @@ HSType ToHSType(CXType type) {
 		break;
 	};
 
-	/* Structs, enums and anything else we don't know:  Hope that the 
-	 * Haskell name already exists, and/or that an opaque data type
-	 * will be emitted for it. */
+	/* Any other name we don't know should have gone through these same
+	 * mechanisms, and the only thing we can do is hope that the
+	 * equivalent name is valid. */
 	default: {
 		type = clang_getUnqualifiedType(type);
 
