@@ -1,5 +1,6 @@
 #include "Generator.hxx"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 
@@ -7,13 +8,25 @@ void BindingsToFile(std::filesystem::path filename, const TranslationUnit& bindi
 	std::ofstream file(filename);
 	file.exceptions(std::ios::badbit | std::ios::failbit);
 
-	std::vector<std::string_view> extensions = {
-		"CApiFFI",
-		"DuplicateRecordFields",
-		"OverloadedRecordDot",
-		"PatternSynonyms",
+	std::vector<std::string_view> extensions{};
+
+	if (!bindings.Functions.empty() || !bindings.Bindings.empty()) {
+		extensions.push_back("CApiFFI");
 	};
 
+	if (!bindings.Enumerations.empty() || !bindings.Constants.empty()) {
+		extensions.push_back("PatternSynonyms");
+	};
+
+	if (!bindings.DataTypes.empty()) {
+		extensions.push_back("OverloadedRecordDot");
+	};
+
+	if (bindings.DataTypes.size() > 1) {
+		extensions.push_back("DuplicateRecordFields");
+	};
+
+	std::sort(extensions.begin(), extensions.end());
 	for (const auto& e : extensions) {
 		file << "{-# LANGUAGE " << e << " #-}" << LineEnd;
 	};
@@ -36,14 +49,18 @@ void BindingsToFile(std::filesystem::path filename, const TranslationUnit& bindi
 		file << "data " << name << LineEnd;
 	};
 
-	file << LineEnd;
+	if (!bindings.UnknownNames.empty()) {
+		file << LineEnd;
+	};
 
 	for (const Constant& c : bindings.Constants) {
 		file << "pattern " << c.BoundName << " :: (Eq a, Bits a, Num a) => a" << LineEnd;
 		file << "pattern " << c.BoundName << " = " << c.Value << LineEnd;
 	};
 
-	file << LineEnd;
+	if (!bindings.Constants.empty()) {
+		file << LineEnd;
+	};
 
 	for (const Enum& e : bindings.Enumerations) {
 		if (!e.BoundName.empty()) {
@@ -62,10 +79,14 @@ void BindingsToFile(std::filesystem::path filename, const TranslationUnit& bindi
 		file << "type " << alias.BoundName << " = " << alias.SourceName << LineEnd;
 	};
 
-	file << LineEnd;
+	if (!bindings.TypeAliases.empty()) {
+		file << LineEnd;
+	};
 
 	for (const Struct& dt : bindings.DataTypes) {
-		file << "data {-# CTYPE \"" << dt.SourceHeader << "\" \""
+		std::string_view rep = dt.Fields.size() == 1? "newtype" : "data";
+
+		file << rep << " {-# CTYPE \"" << dt.SourceHeader << "\" \""
 		     << dt.SourceName << "\" #-} " << dt.BoundName << " = "
 		     << dt.BoundName << " {" << LineEnd;
 
@@ -107,14 +128,14 @@ void BindingsToFile(std::filesystem::path filename, const TranslationUnit& bindi
 		file << LineEnd;
 	};
 
-	file << LineEnd;
-
 	for (const Variable& var : bindings.Bindings) {
 		file << "foreign import capi \"" << var.SourceHeader << " " << var.SourceName
 		     << "\" " << var.BoundName << " :: " << var.Type << LineEnd;
 	};
 
-	file << LineEnd;
+	if (!bindings.Bindings.empty()) {
+		file << LineEnd;
+	};
 
 	for (const Function& fn : bindings.Functions) {
 		file << "foreign import capi \"" << fn.SourceHeader << " " << fn.SourceName

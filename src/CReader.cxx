@@ -24,9 +24,21 @@ TranslationUnit FromSourceFile(const std::filesystem::path filename) {
 	TranslationUnit bindings{};
 	clang_visitChildren(root, TopLevelVisit, &bindings);
 
-	for (const auto& struct_ : bindings.DataTypes) {
-		bindings.UnknownNames.erase(struct_.BoundName);
-		bindings.UnknownNames.erase(struct_.BoundName + "_");
+	for (const auto& st : bindings.DataTypes) {
+		bindings.UnknownNames.erase(st.BoundName);
+		bindings.UnknownNames.erase(st.BoundName + "_");
+	};
+
+	for (const auto& e : bindings.Enumerations) {
+		bindings.UnknownNames.erase(e.BoundName);
+	};
+
+	for (const auto& name : bindings.KnownNames) {
+		bindings.UnknownNames.erase(name);
+	};
+
+	for (const auto& [key, fundamental] : FundamentalTypes) {
+		bindings.UnknownNames.erase(std::string(fundamental.Name));
 	};
 	
 	clang_disposeTranslationUnit(tu);
@@ -217,7 +229,7 @@ CXChildVisitResult TopLevelVisit(CXCursor cursor, CXCursor, CXClientData clientD
 		};
 
 		std::optional<std::pair<Enum, Typedef>> tenum = ParseEnumTypedef(cursor);
-		if (tstruct.has_value()) {
+		if (tenum.has_value()) {
 			auto& [e, td] = tenum.value();
 
 			bindings->Enumerations.insert(e);
